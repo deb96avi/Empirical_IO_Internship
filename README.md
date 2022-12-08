@@ -1,17 +1,3 @@
-# Setting up Git:
-
-* git config --global user.email "<email>"
-* git config --global user.name "<username>"
-* Bitbucket settings->App passwords. Set up and note down passwords
-* Use: git remote set-url origin https://USERNAME:APP_PASSWORD@bitbucket.org/username/reposlug.git
-* Example: git remote set-url origin https://adeb1996:HDapdLubK5Bq6qU5kzgA@bitbucket.org/adeb1996/emperical_io.git
-* git clone https://USERNAME:APP_PASSWORD@bitbucket.org/username/reposlug.git
-* Check proxy settings so that git bash can communicate online and push the codes. Check via:  env|grep -i proxy
-* unset http_proxy
-* unset https_proxy
-* Use above 2 commands whenever you open git
-* Now, use Git commands
-
 # Input files:
 
 1. ensemble.xls: Population at commune level (https://www.insee.fr/fr/statistiques/4265429?sommaire=4265511)
