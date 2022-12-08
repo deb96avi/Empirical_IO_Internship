@@ -1,0 +1,305 @@
+---
+title: "commune_map"
+output: html_document
+date: '2022-05-17'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r cars}
+library(geojsonio)
+library(readxl)
+library(broom)
+library(tidyverse)
+library(ggplot2)
+library(plotly)
+library(sf)
+library(dplyr)
+library(geosphere)
+library(ggnewscale)
+
+# Two datasets are used (one internal and one external):-
+
+#1. pop_map_input.csv: Created from main R code (optique_code_main.Rmd). Contains Optiques store information and commune demographics like population for all 200 markets
+
+#2. spdf: Geojson file containing geographical coordinates of communes. Helps to replicate map of attraction zones
+
+pop_map_input <- read_csv("map_input.csv")
+all_communes <- read_csv("all_communes.csv")
+spdf <- geojson_read("https://raw.githubusercontent.com/gregoiredavid/france-geojson/master/communes.geojson",  what = "sp")
+commune_list<-unique(pop_map_input[["code_commune_geo"]])
+
+test<-spdf[ substr(spdf@data$code,1,5)  %in% commune_list , ]
+map_df <- tidy(test,region = "code")
+```
+
+```{r cars}
+# Merging the 2 datasets to get demographic info on each market
+
+pop_map_input<-subset(pop_map_input,select=c(code_commune_geo,code_attraction_centre,name_commune_src_attr,name_attraction_centre,population_commune))
+pop_map_input<-unique(pop_map_input)
+pop_map_output<-merge(x = map_df, y = pop_map_input, by.x = "id",by.y="code_commune_geo", all.x = TRUE)#89796 rows
+```
+
+```{r cars}
+#largest:merville; smallest: VAL D'ISERE
+
+```
+
+```{r cars}
+# Hover over the map. Click on second-rightmost option (Compare data on hover). Now select area to zoom. Double-click to zoom out
+
+p<-ggplot() +
+  geom_polygon(data = pop_map_output, aes(fill=population_commune, x = long, y = lat, group = id),colour = "grey60")+borders(regions="france", name="borders")+scale_fill_gradient(low = "yellow", high = "red", na.value = NA)+
+  theme_void() +
+  coord_map()
+ggplotly(p)
+```
+
+```{r cars}
+# Beware!! : Below chunk takes 30 mins to compile
+# Finds min. distance between each market. Steps are as follows:-
+# 1. Select a market
+# 2. Dissolve the borders between different communes inside it and make it a single geometrical polygon (command: st_union())
+# 3. For this unified market, select every other markets, unify them and calculate shortest distance(command: st_nearest_points(),distm())
+# 4. Try-exception clause included because some issues in unifying self-intersection communes. However, shape is not distorted much.
+
+centre_list<-unique(pop_map_output[["code_attraction_centre"]])
+dist_list=list()
+zero_distance1=list()
+zero_distance2=list()
+
+for (centre1 in centre_list){
+  attr_df<-filter(pop_map_output,(code_attraction_centre==centre1)&(piece==1))
+  commune_list<-unique(attr_df[["id"]])
+  poly1 = st_polygon()
+  for (id_ref in commune_list){
+    test_df<-filter(attr_df,(id==id_ref)&(piece==1))
+    try(poly1<-poly1 %>% st_union( st_polygon(list( matrix(c(test_df[['long']],test_df[['lat']]),ncol=2)))),silent = TRUE)
+    
+    
+  }
+  min_dist=Inf
+  for (centre2 in centre_list){
+      if(centre2!=centre1){
+        poly2 = st_polygon()
+        attr_df2<-filter(pop_map_output,(code_attraction_centre==centre2)&(piece==1))
+        commune_list2<-unique(attr_df2[["id"]])
+        for (id_ref2 in commune_list2){
+          test_df2<-filter(attr_df2,(id==id_ref2)&(piece==1))
+          try(poly2<-poly2 %>% st_union( st_polygon(list( matrix(c(test_df2[['long']],test_df2[['lat']]),ncol=2)))),silent = TRUE)
+        }
+        poly_dist =st_nearest_points(st_sfc(poly1), st_sfc(poly2))
+        x1=poly_dist[[1]][1]
+        y1=poly_dist[[1]][3]
+        x2=poly_dist[[1]][2]
+        y2=poly_dist[[1]][4]
+        dist1=distm(c(x1,y1), c(x2,y2), fun = distHaversine)/1000
+        
+        if (dist1==0){
+        zero_distance1<-append(zero_distance1,centre1)
+        zero_distance2<-append(zero_distance2,centre2)
+        }
+        
+        if (min_dist>dist1){
+        min_dist=dist1
+        }
+        
+      }
+      
+  }
+
+  dist_list<-append(dist_list,min_dist) 
+
+}
+
+zero_dist_markets<-data.frame(market_1=unlist(zero_distance1))
+zero_dist_markets$market_2<-zero_distance2
+zero_dist_markets$market_2 <-unlist(zero_dist_markets$market_2 )
+# 44 observations implies 22 pairs of adjacent markets since each is double-counted
+```
+
+
+```{r cars}
+# Debugging left for below chunk !
+# Joins adjacent markets when distance is zero between them
+
+pop1=subset(pop_map_input,select=c(code_attraction_centre,population_commune))
+pop1<-aggregate(pop1$population_commune,by=list(attraction_code=pop1$`code_attraction_centre`),FUN=sum)
+
+pop2<-merge(x = zero_dist_markets, y = pop1, by.x="market_1", by.y = "attraction_code", all.x = TRUE)
+pop2<-pop2 %>%  rename(pop_1=x)
+
+pop2<-merge(x = pop2, y = pop1, by.x="market_2", by.y = "attraction_code", all.x = TRUE)
+pop2<-pop2 %>%  rename(pop_2=x)
+
+pop2<-pop2%>%mutate("market_new"=ifelse(pop2$pop_1>=pop2$pop_2, pop2$market_1,pop2$market_2))
+
+# manually check that a market is not assigned to multiple adjoining markets
+# correct them manually: Examples of market code here :- 677, 579, 557
+
+pop2["market_new"][pop2["market_1"] == 677] <- 497
+pop2["market_new"][pop2["market_1"] == 536] <- 497
+pop2["market_new"][pop2["market_1"] == 579 | pop2["market_2"] == 579] <- 500
+pop2["market_new"][pop2["market_1"] == 557 | pop2["market_2"] == 557] <- 526
+
+pop3=unique(subset(pop2,select=c(market_1 ,market_new)))
+
+pop_map_output2<-pop_map_output #89796 rows
+pop_map_output2<-merge(x = pop_map_output2, y = pop3, by.x="code_attraction_centre", by.y = "market_1", all.x = TRUE)
+
+pop_map_output2<-pop_map_output2%>%mutate(market_new=ifelse(is.na(market_new),pop_map_output2$code_attraction_centre,pop_map_output2$market_new))
+
+z<-unique(subset(pop_map_output2,select=c(code_attraction_centre ,market_new)))
+
+# test<-unique(z$market_new) 
+#178 markets now
+#write.csv(z,"new_market_mapping.csv", row.names = TRUE)
+```
+
+```{r cars}
+# Beware!! : Below chunk takes 30 mins to compile
+# Find minimum distance again for new set of markets
+# debugging left
+
+centre_list<-unique(pop_map_output2[["market_new"]])
+dist_list=list()
+zero_distance1=list()
+zero_distance2=list()
+
+
+for (centre1 in centre_list){
+  attr_df<-filter(pop_map_output2,(market_new==centre1)&(piece==1))
+  poly1<-st_combine(attr_df%>%st_as_sf( coords = c( "long", "lat" ), crs = 4326 )%>%st_convex_hull())
+  min_dist=Inf
+  for (centre2 in centre_list){
+      if(centre2!=centre1){
+        
+        attr_df2<-filter(pop_map_output2,(market_new==centre2)&(piece==1))
+        poly2<-st_combine(attr_df2%>%st_as_sf( coords = c( "long", "lat" ), crs = 4326 )%>%st_convex_hull())
+        poly_dist =st_nearest_points(st_sfc(poly1), st_sfc(poly2))
+        x1=poly_dist[[1]][1]
+        y1=poly_dist[[1]][3]
+        x2=poly_dist[[1]][2]
+        y2=poly_dist[[1]][4]
+        dist1=distm(c(x1,y1), c(x2,y2), fun = distHaversine)/1000
+        
+        if (dist1==0){
+        zero_distance1<-append(zero_distance1,centre1)
+        zero_distance2<-append(zero_distance2,centre2)
+        }
+        
+        if (min_dist>dist1){
+        min_dist=dist1
+        }
+        
+      }
+      
+  }
+
+  dist_list<-append(dist_list,min_dist) 
+
+}
+
+```
+
+```{r cars}
+# Summary statistics of minimum distance between markets. 
+
+summary(t(data.frame(dist_list)))
+
+```
+
+
+```{r cars}
+# Robustness check for effect of nearest city. We follow Seim's methodology
+# Checks for nearest city within 10 kms with population > 10,000 and 20 kms within population > 25,0000. Seim removes such markets since they may not be considered isolated due to presence of large cities
+
+top_pop_communes<-all_communes%>%filter(population_commune>=10000)
+
+centre_list<-unique(pop_map_output[["code_attraction_centre"]])
+top_pop_commune_list<-unique(top_pop_communes[["code_commune_geo"]])
+
+dist_10_commune=list()
+dist_20_commune=list()
+for (centre1 in centre_list){
+  attr_df<-filter(pop_map_output,(code_attraction_centre==centre1)&(piece==1))
+  commune_list<-unique(attr_df[["id"]])
+  poly1 = st_polygon()
+  for (id_ref in commune_list){
+    test_df<-filter(attr_df,(id==id_ref)&(piece==1))
+    try(poly1<-poly1 %>% st_union( st_polygon(list( matrix(c(test_df[['long']],test_df[['lat']]),ncol=2)))),silent = TRUE)
+  }
+  pop_max1=0
+  ind_max1=0  
+  pop_max2=0
+  ind_max2=0
+  for (top_commune in top_pop_commune_list){
+    
+    test_df2<-top_pop_communes%>%filter(code_commune_geo==top_commune)
+    poly_dist =st_nearest_points(st_sfc(poly1), st_point(c(test_df2[['longitude']],test_df2[['latitude']])))
+    x1=poly_dist[[1]][1]
+    y1=poly_dist[[1]][3]
+    x2=poly_dist[[1]][2]
+    y2=poly_dist[[1]][4]
+    dist1=distm(c(x1,y1), c(x2,y2), fun = distHaversine)/1000
+    
+    if (dist1>20){
+      next
+    }
+    if (dist1<=10 & test_df2[['population_commune']][1]>10000){
+      if (pop_max1<test_df2[['population_commune']][1]){
+        pop_max1=test_df2[['population_commune']][1]
+        ind_max1=top_commune
+      }
+    }
+    if (dist1<=20 & test_df2[['population_commune']][1]>25000){
+      if (pop_max2<test_df2[['population_commune']][1]){
+        pop_max2=test_df2[['population_commune']][1]
+        ind_max2=top_commune
+      }
+    }    
+  }
+  if (ind_max1==0){
+    dist_10_commune<-append(dist_10_commune,"")
+  }
+  if (ind_max1!=0){
+    dist_10_commune<-append(dist_10_commune,ind_max1)
+  }
+  if (ind_max2==0){
+    dist_20_commune<-append(dist_20_commune,"")
+  }
+  if (ind_max2!=0){
+    dist_20_commune<-append(dist_20_commune,ind_max2)
+  }
+
+}
+
+```
+
+```{r cars}
+nearest_city_check<-data.frame(code_market=centre_list)
+nearest_city_check$nearest_large_town_10<-dist_10_commune
+nearest_city_check$nearest_large_town_20<-dist_20_commune
+```
+
+```{r cars}
+# Commune centroid (geometric). Finds no. of stores at each commune and assigns their location to the centroid
+
+centroid_df <- data.frame(matrix(ncol = 3, nrow = 0))
+colnames(centroid_df) <-c("commune_code", "long_centroid","lat_centroid")
+commune_codes<-unique(pop_map_input[["code_commune_geo"]])
+
+for (commune_code in commune_codes){
+  test_df<-filter(pop_map_output,(id==commune_code)&(piece==1))
+  
+  poly1 = st_polygon(list( matrix(c(test_df[['long']],test_df[['lat']]),ncol=2)))
+  test<-st_centroid(poly1)
+  centroid_df[nrow(centroid_df) + 1,] <- c(commune_code, test[[1]][1], test[[2]][1])
+
+}
+#write.csv(centroid_df,"commune_centroid_geometric.csv", row.names = TRUE)
+```

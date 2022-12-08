@@ -1,0 +1,1054 @@
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r ,echo=FALSE}
+library(ggplot2)
+library(tidyverse)
+library(readxl)
+library(readr)
+library(rje)
+library(geosphere)
+library(plotly)
+library("dplyr")
+library(miceadds)
+library(sandwich)
+
+```
+
+Importing datasets
+
+Sources:-
+                              
+1. ensemble.xls: Population at commune level
+                 (https://www.insee.fr/fr/statistiques/4265429?sommaire=4265511)
+                 
+2. communes-departement-region.csv: Geographical location of each commune                                                                       (https://www.data.gouv.fr/en/datasets/communes-de-france-base-des-codes-postaux/)
+
+3. attraction_city.xlsx: 2020 city attraction zoning areas. Consists of Pole (highly dense population) and                                Suburbs (https://www.insee.fr/fr/statistiques/5039879?sommaire=5040030)
+
+4. etablissements.csv: Optique shop level data. Go to wesite-> build a list-> Check Active establishment box->                          Activity-> 47.78A from Dropdown (https://sirene.fr/sirene/public/accueil)
+
+5. optiques_200_centres_modified.xlsx: manually labelled optique stores' memberships 
+
+6. new_market_mapping.xlsx: new market codes after considering adjacent markets to be part of a single large unit
+
+7. Demographics folder: Obtained from INSEE (https://statistiques-locales.insee.fr/#c=indicator&view=map1)
+
+```{r pressure, echo=FALSE}
+# Some warnings may appear in red. It is caused by communes outside mainland France which have alphanumeric commune id instead of numeric. But it is fine since we will remove them in next step.
+
+setwd('../')
+x=getwd()
+commune <- read_excel("input/UU2010_au_01-01-2020.xlsx",sheet = "Composition_communale", skip = 5)
+commune_pop <- read_excel("input/ensemble.xls", sheet = "Communes", skip = 7)
+commune_location <- read_csv("input/communes-departement-region.csv", 
+col_types = cols(code_commune_INSEE = col_character(), code_departement = col_character()))
+attraction_city <- read_excel("input/attraction_city.xlsx", skip = 2)
+etablissements <- read_csv("input/etablissements.csv")
+
+optique_networks <- read_excel("docs/optiques_200_centres_modified.xlsx")
+new_market_mapping <- read_excel("docs/new_market_mapping.xlsx")
+```
+
+```{r pressure, echo=FALSE}
+#remove communes outside mainland France
+commune_location<-commune_location%>%filter(code_commune_INSEE<97101)
+commune_location<-filter(commune_location, !grepl('A|B', code_commune_INSEE))
+commune_pop<-commune_pop%>%filter(`Code département`<=95)
+
+```
+
+```{r pressure, echo=FALSE}
+#Renaming columns. Look at insee documentation file to know more about columns in siret dataset 
+
+commune_pop<-commune_pop %>% 
+  rename(
+    code_region=`Code région`,
+    name_region=`Nom de la région`,	
+    code_department=`Code département`,
+    code_commune_geo=`Code commune`,
+    name_commune=`Nom de la commune`	,
+    population_commune=`Population totale`
+    )
+commune_pop=subset(commune_pop,select=c(code_region,
+    name_region,	
+    code_department,
+    code_commune_geo,
+    name_commune,
+    population_commune))
+
+commune_location<-commune_location %>% 
+  rename(
+    code_commune_geo=code_commune_INSEE	
+    )
+commune_location=subset(commune_location,select=c(code_commune_geo,latitude,longitude))
+
+attraction_city<-attraction_city %>% 
+  rename(
+    code_commune_geo=`Code géographique de la commune`,	
+    name_commune_src_attr=`Libellé géographique de la commune`,
+    code_attraction_centre=	`Code géographique de l'aire d'attraction des villes 2020`,
+    name_attraction_centre	= `Libellé géographique de l'aire d'attraction des villes 2020`,
+    category_attraction_centre= `Catégorie de la commune dans le zonage en aires d'attraction des villes 2020`
+    )
+attraction_city=subset(attraction_city,select=c(code_commune_geo,	
+    name_commune_src_attr,
+    code_attraction_centre,
+    name_attraction_centre,
+    category_attraction_centre
+))
+
+etablissements$shop_address_1 <- paste(etablissements$numeroVoieEtablissement,etablissements$indiceRepetitionEtablissement,etablissements$typeVoieEtablissement,etablissements$libelleVoieEtablissement,etablissements$codePostalEtablissement)
+
+etablissements$shop_address_2 <- paste(etablissements$numeroVoie2Etablissement,etablissements$indiceRepetition2Etablissement,etablissements$typeVoie2Etablissement,etablissements$libelleVoie2Etablissement,etablissements$codePostal2Etablissement)
+
+etablissements<-etablissements %>% 
+  rename(
+      date_creation =	dateCreationEtablissement
+    , year_workforce_record_update	= anneeEffectifsEtablissement
+    , date_latest_update	= dateDernierTraitementEtablissement
+    , headquarter		= etablissementSiege
+    , date_creation_legal_unit	= dateCreationUniteLegale
+    , category	= categorieJuridiqueUniteLegale
+    ,	legal_shop_name = denominationUniteLegale	 
+    , acronym_shop=	sigleUniteLegale
+    , popular_name_1	= denominationUsuelle1UniteLegale
+    , popular_name_2	= denominationUsuelle2UniteLegale
+    , popular_name_3	= denominationUsuelle3UniteLegale
+    , owner_gender = sexeUniteLegale
+    , owner_lastname	= nomUniteLegale
+    , owner_lastname_chosen	= nomUsageUniteLegale
+    , owner_firstname_1	= prenom1UniteLegale
+    , owner_firstname_2	= prenom2UniteLegale
+    , owner_firstname_3	= prenom3UniteLegale
+    , owner_firstname_4	= prenom4UniteLegale
+    , owner_firstname_used	= prenomUsuelUniteLegale
+    , owner_pseudonym	= pseudonymeUniteLegale
+    , apen_code	= activitePrincipaleUniteLegale
+    ,rna_registration_code = identifiantAssociationUniteLegale
+    , social_category =	economieSocialeSolidaireUniteLegale	
+    , workforce_category = trancheEffectifsUniteLegale
+    , year_workforce_survey	= anneeEffectifsUniteLegale
+    , nic_centralized	= nicSiegeUniteLegale
+    , date_sirene_last_update	= dateDernierTraitementUniteLegale
+    , category_business	= categorieEntreprise
+    , year_category_survey = anneeCategorieEntreprise
+    , shop_address_complement_1	= complementAdresseEtablissement
+    	
+    , name_commune_src_etab=	libelleCommuneEtablissement		
+    , code_commune_geo=		codeCommuneEtablissement
+    , shop_address_complement_2	= complementAdresse2Etablissement
+    			
+    , franchise_1	= enseigne1Etablissement
+    , franchise_2	= enseigne2Etablissement
+    , franchise_3	= enseigne3Etablissement
+    , shop_name_public= denominationUsuelleEtablissement
+    )
+
+etablissements=subset(etablissements,select=c(  siren
+    ,nic
+    ,siret
+    ,date_creation
+    , year_workforce_record_update
+    , date_latest_update
+    , headquarter
+    , date_creation_legal_unit
+    , category
+    ,	legal_shop_name
+    , acronym_shop
+    , popular_name_1
+    , popular_name_2
+    , popular_name_3
+    , owner_gender
+    , owner_lastname
+    , owner_lastname_chosen
+    , owner_firstname_1
+    , owner_firstname_2
+    , owner_firstname_3
+    , owner_firstname_4
+    , owner_firstname_used
+    , owner_pseudonym
+    , apen_code
+    ,rna_registration_code
+    , social_category
+    , workforce_category
+    , year_workforce_survey
+    , nic_centralized
+    , date_sirene_last_update
+    , category_business
+    , year_category_survey
+    , shop_address_complement_1
+    	
+    , name_commune_src_etab		
+    , code_commune_geo
+    , shop_address_complement_2
+    			
+    , franchise_1
+    , franchise_2
+    , franchise_3
+    , shop_name_public
+    , shop_address_1
+    , shop_address_2))
+                                                
+
+
+
+```
+
+```{r , echo=FALSE}
+
+etablissements$shop_address_1<- gsub('NA', '', etablissements$shop_address_1)
+etablissements$shop_address_1<- gsub('  ', ' ', etablissements$shop_address_1)
+
+etablissements$shop_address_2<- gsub('NA', '', etablissements$shop_address_2)
+etablissements$shop_address_2<- gsub('  ', ' ', etablissements$shop_address_2)
+```
+
+```{r , echo=FALSE}
+# Making the primary key of datasets (code_commune_geo) of the same format before merging
+
+commune_location$Name_length = str_length(commune_location$code_commune_geo) 
+commune_location<-commune_location%>%mutate(code_commune_geo=ifelse(Name_length == 4, paste0("0",commune_location$code_commune_geo),commune_location$code_commune_geo)) 
+
+commune_location=subset(commune_location,select=c(code_commune_geo,latitude,longitude))
+commune_location <- unique( commune_location )
+
+commune_pop$code_new = paste0(commune_pop$"code_department",commune_pop$"code_commune_geo")
+
+#New aires d'attractions:
+
+attraction_city$Name_length = str_length(attraction_city$"code_commune_geo") 
+attraction_city<-attraction_city%>%mutate("code_commune_geo"=ifelse(Name_length == 4, paste0("0",attraction_city$"code_commune_geo"),attraction_city$"code_commune_geo")) 
+attraction_city=subset(attraction_city,select=-c(Name_length))
+
+#remove communes outside mainland France
+attraction_city<-attraction_city%>%filter(!(is.na(code_commune_geo)))
+attraction_city<-attraction_city%>%filter(code_commune_geo<97101)
+
+```
+
+
+```{r , echo=FALSE}
+# Grouping Paris, Lyon and Marseille Arrodisement values in location and population tables
+
+test<-filter(commune_pop, (code_new>=75101 & code_new<=75120) | (code_new>=13201 & code_new<=13216))
+commune_pop<-filter(commune_pop, !((code_new>=75101 & code_new<=75120) | (code_new>=13201 & code_new<=13216)))
+test<-test%>%select(code_region,population_commune)%>%group_by(code_region)%>%summarise(population_commune=mean(population_commune))
+commune_pop[nrow(commune_pop) + 1,] = list('11', 'Île-de-France', '75','056','Paris',(test%>%filter(code_region==11))[['population_commune']],'75056')
+commune_pop[nrow(commune_pop) + 1,] = list('93', "Provence-Alpes-Côte d'Azur", '13','055','Marseille ',(test%>%filter(code_region==93))[['population_commune']],'13055')
+
+test<-filter(commune_location, (code_commune_geo>=75101 & code_commune_geo<=75120) | (code_commune_geo>=13201 & code_commune_geo<=13216))
+commune_location<-filter(commune_location, !((code_commune_geo>=75101 & code_commune_geo<=75120) | (code_commune_geo>=13201 & code_commune_geo<=13216)))
+test["code_commune_geo"]<-ifelse((test["code_commune_geo"]>=75101) & (test["code_commune_geo"]<=75120), 75056,13055)
+test<-test%>%group_by(code_commune_geo)%>%summarise(latitude=mean(latitude),longitude=mean(longitude))
+commune_location[nrow(commune_location) + 1,] = list('75056', (test%>%filter(code_commune_geo==75056))[['latitude']],(test%>%filter(code_commune_geo==75056))[['longitude']])
+commune_location[nrow(commune_location) + 1,] = list('13055', (test%>%filter(code_commune_geo==13055))[['latitude']],(test%>%filter(code_commune_geo==13055))[['longitude']])
+#
+
+test<-filter(commune_pop, code_new>=69381 & code_new<=69389)
+commune_pop<-filter(commune_pop, !(code_new>=69381 & code_new<=69389))
+test<-test%>%select(code_region,population_commune)%>%group_by(code_region)%>%summarise(population_commune=mean(population_commune))
+commune_pop[nrow(commune_pop) + 1,] = list('84', 'Auvergne-Rhône-Alpes
+', '69','123','Lyon',test[['population_commune']],'69123')
+
+test<-filter(commune_location, code_commune_geo>=69381 & code_commune_geo<=69389)
+commune_location<-filter(commune_location, !(code_commune_geo>=69381 & code_commune_geo<=69389))
+test["code_commune_geo"]<-69123
+test<-test%>%group_by(code_commune_geo)%>%summarise(latitude=mean(latitude),longitude=mean(longitude))
+commune_location[nrow(commune_location) + 1,] = list('69123', test[['latitude']],test[['longitude']])
+
+```
+
+
+```{r , echo=FALSE}
+# Merge check. There is perfect merge if no null value present in 'flag_..' columns post merging
+
+attraction_city['flag_attr']=1
+commune_pop['flag_pop']=1
+commune_location['flag_loc']=1
+etablissements['flag_optique']=1
+
+#Merging commune population and location tables
+
+commune_attr_pop<-merge(x = attraction_city, y = commune_pop, by.x="code_commune_geo",by.y="code_new", all.x = TRUE)
+commune_merge<-merge(x = commune_attr_pop, y = commune_location, by="code_commune_geo", all.x = TRUE)
+
+#merging with siret dataset to get optique store level information
+
+commune_merge_shop<-merge(x = commune_merge, y = etablissements, by="code_commune_geo", all.x = TRUE)
+
+# Attraction Zone--Population merge
+z1<-commune_attr_pop%>%filter(is.na(flag_attr))
+z2<-commune_attr_pop%>%filter(is.na(flag_pop))
+# Geolocation merge
+z3<-commune_merge%>%filter(is.na(flag_attr))
+z4<-commune_merge%>%filter(is.na(flag_loc))
+# Optiques stores merge
+z5<-commune_merge_shop%>%filter(is.na(flag_attr))
+z6<-commune_merge_shop%>%filter(is.na(flag_optique))
+z7<-commune_merge_shop%>%filter(is.na(siren))
+
+#write.csv(commune_merge,"map_input.csv", row.names = TRUE)
+```
+
+```{r , echo=FALSE}
+#Merge to get top 200 least populated attraction units
+
+commune_merge2=subset(commune_merge,select=c(code_attraction_centre,population_commune))
+commune_merge3<-aggregate(commune_merge2$population_commune,by=list(attraction_code=commune_merge2$`code_attraction_centre`),FUN=sum)
+commune_merge3=arrange(commune_merge3,x)
+commune_top_100<-head(commune_merge3,200)
+x=commune_top_100$attraction_code
+shop_top_communes<-subset(commune_merge_shop, `code_attraction_centre` %in% x)
+
+```
+
+
+```{r , echo=FALSE}
+commune_merge4<-merge(x = shop_top_communes, y = commune_merge3, by.x = "code_attraction_centre",by.y="attraction_code", all.x = TRUE)
+commune_merge4<-commune_merge4 %>%  rename(population_attr_centre=x)
+y<-arrange(commune_merge4,population_attr_centre)
+
+test4<-y%>%filter(is.na(siren))
+#write.csv(y,"optiques_200_centres.csv", row.names = TRUE)
+```
+
+```{r , echo=FALSE}
+sire_na_merge_shop<-commune_merge4%>%filter(is.na(siren))
+
+optique_networks<-optique_networks %>% 
+  rename(
+    siren=siren.x,
+    nic=nic.x,	
+    )
+optique_networks=subset(optique_networks,select=-c(`...1` ,siren_nic,siren.y,nic.y))
+library("plyr")
+optique_networks_full<-rbind.fill(optique_networks,sire_na_merge_shop)
+detach("package:plyr", unload=TRUE)
+library(dplyr)
+library(plotly)
+```
+
+```{r , echo=FALSE}
+# assigning stores to new markets after joining adjacent markets
+
+optique_networks_full<-merge(x = optique_networks_full, y = new_market_mapping, by = "code_attraction_centre", all.x = TRUE)
+
+optique_networks_full<-optique_networks_full %>% 
+  rename(
+    code_attraction_centre_old=code_attraction_centre,
+    code_attraction_centre=market_new	
+    )
+x=subset(optique_networks_full,select=c(code_attraction_centre,population_commune))
+x<-unique(x)
+x<-x%>%group_by(code_attraction_centre)%>%summarise(population_attr_centre=sum(population_commune))
+
+optique_networks_full=subset(optique_networks_full,select=-c(population_attr_centre))
+optique_networks_full<-merge(x = optique_networks_full, y = x, by=c("code_attraction_centre"), all.x = TRUE)
+
+
+network<-optique_networks_full%>%filter(!is.na(siren))
+zero_optique_communes=optique_networks_full%>%filter(is.na(siren))
+
+```
+
+
+```{r , echo=FALSE}
+#adds columns with different combinations of networks
+
+network<-network %>%
+  rowwise() %>%
+  mutate(
+    no_network = sum(c(carte_blanche,itelis,kalixia,sante_clair,seveane))
+  )
+network<-network%>%mutate("no_network"=ifelse(no_network == 0, 1,0))
+
+network_names<-c('carte_blanche','itelis','kalixia','sante_clair','seveane')
+network_comb<-powerSet(network_names)
+
+for (i in network_comb){
+  
+  if (length(i)==1){
+    
+    y<-c(unlist(i))
+    network["sum"] = rowSums(network[,y])
+    y_other<-network_names[!network_names %in% y]
+    network["other_sum"] = rowSums(network[,y_other])
+    network[[paste(y,"exclusive",sep="_")]]<-ifelse((network["sum"]==length(i)) & (network["other_sum"]==0), 1,0)
+    
+  }
+  
+  if (length(i)>=2){
+    
+    y<-c(unlist(i))
+    network["sum"] = rowSums(network[,y])
+    y_other<-network_names[!network_names %in% y]
+    network["other_sum"] = rowSums(network[,y_other])
+    network[[paste(y,collapse="_")]]<-ifelse((network["sum"]==length(i)) & (network["other_sum"]==0), 1,0)
+    
+  }
+}
+network=subset(network,select=-c(sum,other_sum))
+
+```
+
+```{r , echo=FALSE}
+# commune & attraction centre population characteristics
+
+z<-unique(optique_networks_full%>%select(code_attraction_centre,name_commune_src_attr))
+z<-z%>%group_by(code_attraction_centre)%>%summarise(n=n())
+
+print("no. of communes/attraction zones statistics")
+summary(z$n)
+print("commune population statistics")
+summary(optique_networks_full$population_commune)
+print("attraction zone population statistics")
+summary(optique_networks_full$population_attr_centre)
+```
+
+```{r , echo=FALSE}
+x<-optique_networks_full%>%mutate(freq=1)
+
+y<-x%>%filter(!is.na(carte_blanche))%>%group_by(code_attraction_centre)%>%summarise(tot_optique=n(),pop_sum=mean(population_attr_centre))
+print("No of stores in each market")
+summary(y$tot_optique)
+
+y%>%
+  ggplot( aes(x=pop_sum, y=tot_optique)) +
+    geom_point() 
+
+y %>%filter(!is.na(tot_optique))%>%
+  ggplot( aes(x=pop_sum, y=tot_optique,group=tot_optique)) +
+    geom_boxplot()+xlab("Market Population")+ylab("No. of Optiques") 
+
+```
+
+```{r , echo=FALSE}
+z1<-unique(network%>%select(population_commune,carte_blanche))
+z2<-unique(network%>%select(population_commune,itelis))
+z3<-unique(network%>%select(population_commune,kalixia))
+z4<-unique(network%>%select(population_commune,sante_clair))
+z5<-unique(network%>%select(population_commune,seveane))
+
+
+print("Atleast one store commune population statistics")
+summary(unique(network$population_commune))
+print("zero stores commune population statistics")
+summary(unique(zero_optique_communes$population_commune))
+print("Carte Blanche population statistics")
+tapply(z1$population_commune, z1$carte_blanche, summary)$`1`
+print("Itelis population statistics")
+tapply(z2$population_commune, z2$itelis, summary)$`1`
+print("Kalixia population statistics")
+tapply(z3$population_commune, z3$kalixia, summary)$`1`
+print("Sante Clair population statistics")
+tapply(z4$population_commune, z4$sante_clair, summary)$`1`
+print("Seveane population statistics",font.style='bold')
+tapply(z5$population_commune, z5$seveane, summary)$`1`
+
+```
+
+
+
+```{r , echo=FALSE}
+
+ggplot(network, aes(x=franchise)) + geom_bar(aes(y = (..count..)*100/sum(..count..)))+xlab("franchise") + ylab("Frequency %")+theme(axis.text.x = element_text(face = "bold", color = "#993333", size = 8, angle = 45,hjust = 1))
+
+test<-data.frame(colSums((network%>%filter(!is.na(`no_network`)))[,73:104]))
+test <- cbind(newColName = rownames(test), test)
+rownames(test) <- 1:nrow(test)
+colnames(test)<-c('combination','freq')
+test$freq<-test$freq*100/sum(test$freq)
+
+ggplot(data=test,aes(x=reorder(combination,-freq),freq)) + geom_bar(stat="identity")+theme(axis.text.x = element_text(face = "bold", color = "#993333", size = 8, angle = 45,hjust = 1))+xlab("combinations") + ylab("frequency %")
+
+```
+
+```{r , echo=FALSE}
+# Franchise-network summary
+franchise_network_summ<-subset(network%>%filter(!is.na(`no_network`)),select=c("franchise","carte_blanche","itelis","kalixia","sante_clair","seveane"))%>%group_by(franchise)%>%summarise(seveane=sum(seveane),carte_blanche=sum(carte_blanche),itelis=sum(itelis),kalixia=sum(kalixia),sante_clair=sum(sante_clair))
+```
+
+```{r , echo=FALSE}
+x<-network %>%
+  rowwise() %>%
+  mutate(
+    Total_networks = sum(c(carte_blanche,itelis,kalixia,sante_clair,seveane))
+  )
+
+x<-x%>%mutate(franchise_p=ifelse(is.na(franchise),0,1))
+
+ggplot(data=x,aes(x=Total_networks)) + geom_bar(aes(y = (..count..)*100/sum(..count..)))+xlab("No of networks") + ylab("No. of shops %") 
+
+x<-x%>%filter(!is.na(Total_networks))
+x$franchise_p <- factor(x$franchise_p) 
+x$Total_networks <- factor(x$Total_networks)
+ggplot(x, aes(fill=franchise_p, x=Total_networks)) + geom_bar(aes(y = (..count..)*100/sum(..count..)),position="dodge")+xlab("No. of networks") + ylab("No. of shops % %")+labs(fill="franchise store (=1 if yes)")+theme(legend.position="bottom")
+```
+
+```{r , echo=FALSE}
+# Market population vs average networks subscription 
+x<-network %>%
+  rowwise() %>%
+  mutate(
+    Total_networks = sum(c(carte_blanche,itelis,kalixia,sante_clair,seveane))
+  )
+
+x2<-unique(subset(x,select=c(population_attr_centre,Total_networks)))
+x3<-x2%>%group_by(population_attr_centre)%>%summarise(avg_net=mean(Total_networks))
+x3%>%
+  ggplot( aes(x=population_attr_centre, y=avg_net,group=avg_net)) +
+    geom_boxplot()+xlab("Market Population")+ylab("Average no. of Network Affiliation by Stores")
+
+```
+
+```{r , echo=FALSE}
+#Importing the store geolocation obtained from python script
+python_output <- read_csv("optiques_200_centres_python_output.csv")
+python_output=subset(python_output,select=c(siren.x,nic.x,shop_lat,shop_long))
+python_output<-python_output %>% 
+  rename(
+    siren=siren.x,
+    nic=nic.x	
+    )
+optique_geolocation<-merge(x = network, y = python_output, by=c("siren","nic"), all.x = TRUE)
+
+```
+
+
+```{r , echo=FALSE}
+# Calculate average minimum distance between stores
+
+dist_list=list()
+test_list=list()
+market_list=optique_geolocation$code_attraction_centre
+market_list=unique(market_list)
+for (market_code in market_list){
+  df1<-optique_geolocation%>%filter(code_attraction_centre==market_code)
+  test1<-distm(data.matrix(select(df1, shop_long, shop_lat)), fun = distHaversine)/1000
+  # If more than one shop
+  if(dim(test1)[1]>1){
+      test1<-data.frame(test1)
+      test1<-test1 %>%`diag<-`(., Inf)
+      z<-apply(test1, 1, FUN = min)
+      dist_list<-append(dist_list,mean(z))
+      #checking for >10 kms separation and identify outliers
+      if(mean(z)>10){
+        test_list<-append(test_list,market_code)
+      }
+  }
+
+}
+dist_list<-data.frame(dist_list)
+summary(t(dist_list))
+
+```
+
+```{r , echo=FALSE}
+# Distance statistics
+dist_carte_blanche=list()
+n_carte_blanche=list()
+dist_itelis=list()
+n_itelis=list()
+dist_kalixia=list()
+n_kalixia=list()
+dist_santeclair=list()
+n_santeclair=list()
+dist_seveane=list()
+n_seveane=list()
+
+for (market_code in market_list){
+  df_carte_blanche<-optique_geolocation%>%filter((code_attraction_centre==market_code)&(carte_blanche==1))
+  df_itelis<-optique_geolocation%>%filter((code_attraction_centre==market_code)&(itelis==1))
+  df_kalixia<-optique_geolocation%>%filter((code_attraction_centre==market_code)&(kalixia==1))
+  df_santeclair<-optique_geolocation%>%filter((code_attraction_centre==market_code)&(sante_clair==1))
+  df_seveane<-optique_geolocation%>%filter((code_attraction_centre==market_code)&(seveane==1))
+  
+  dist_matrix_carte_blanche<-matrix(0, 1, 1)
+  try(dist_matrix_carte_blanche<-distm(data.matrix(select(df_carte_blanche, shop_long, shop_lat)), fun = distHaversine)/1000,silent = TRUE)
+  
+  dist_matrix_itelis<-matrix(0, 1, 1)
+  try(dist_matrix_itelis<-distm(data.matrix(select(df_itelis, shop_long, shop_lat)), fun = distHaversine)/1000,silent = TRUE)
+  
+  dist_matrix_kalixia<-matrix(0, 1, 1)
+  try(dist_matrix_kalixia<-distm(data.matrix(select(df_kalixia, shop_long, shop_lat)), fun = distHaversine)/1000,silent = TRUE)
+  
+  dist_matrix_sante_clair<-matrix(0, 1, 1)
+  try(dist_matrix_sante_clair<-distm(data.matrix(select(df_santeclair, shop_long, shop_lat)), fun = distHaversine)/1000,silent = TRUE)
+  
+  dist_matrix_seveane<-matrix(0, 1, 1)
+  try(dist_matrix_seveane<-distm(data.matrix(select(df_seveane, shop_long, shop_lat)), fun = distHaversine)/1000,silent = TRUE)
+  
+  # If more than one shop
+  if(dim(dist_matrix_carte_blanche)[1]>1){
+      dist_matrix_carte_blanche<-data.frame(dist_matrix_carte_blanche)
+      dist_matrix_carte_blanche<-dist_matrix_carte_blanche %>%`diag<-`(., Inf)
+      z<-apply(dist_matrix_carte_blanche, 1, FUN = min)
+      dist_carte_blanche<-append(dist_carte_blanche,mean(z))
+      n_carte_blanche<-append(n_carte_blanche,dim(df_carte_blanche)[1])
+
+  }
+
+    if(dim(dist_matrix_itelis)[1]>1){
+      dist_matrix_itelis<-data.frame(dist_matrix_itelis)
+      dist_matrix_itelis<-dist_matrix_itelis %>%`diag<-`(., Inf)
+      z<-apply(dist_matrix_itelis, 1, FUN = min)
+      dist_itelis<-append(dist_itelis,mean(z))
+      n_itelis<-append(n_itelis,dim(df_itelis)[1])
+
+  }
+
+    if(dim(dist_matrix_kalixia)[1]>1){
+      dist_matrix_kalixia<-data.frame(dist_matrix_kalixia)
+      dist_matrix_kalixia<-dist_matrix_kalixia %>%`diag<-`(., Inf)
+      z<-apply(dist_matrix_kalixia, 1, FUN = min)
+      dist_kalixia<-append(dist_kalixia,mean(z))
+      n_kalixia<-append(n_kalixia,dim(df_kalixia)[1])
+
+  }
+
+    if(dim(dist_matrix_sante_clair)[1]>1){
+      dist_matrix_sante_clair<-data.frame(dist_matrix_sante_clair)
+      dist_matrix_sante_clair<-dist_matrix_sante_clair %>%`diag<-`(., Inf)
+      z<-apply(dist_matrix_sante_clair, 1, FUN = min)
+      dist_santeclair<-append(dist_santeclair,mean(z))
+      n_santeclair<-append(n_santeclair,dim(df_santeclair)[1])
+
+  }
+
+    if(dim(dist_matrix_seveane)[1]>1){
+      dist_matrix_seveane<-data.frame(dist_matrix_seveane)
+      dist_matrix_seveane<-dist_matrix_seveane %>%`diag<-`(., Inf)
+      z<-apply(dist_matrix_seveane, 1, FUN = min)
+      dist_seveane<-append(dist_seveane,mean(z))
+      n_seveane<-append(n_seveane,dim(df_seveane)[1])
+  }
+
+}
+
+n_carte_blanche<-data.frame(n_carte_blanche)
+n_itelis<-data.frame(n_itelis)
+n_kalixia<-data.frame(n_kalixia)
+n_santeclair<-data.frame(n_santeclair)
+n_seveane<-data.frame(n_seveane)
+
+print("Carte Blanche")
+print(paste("Avg no. of stores in each market:",rowMeans(n_carte_blanche)))
+print("distance statistics")
+dist_carte_blanche<-data.frame(dist_carte_blanche)
+print(paste("distance n_obs:",dim(dist_carte_blanche)[2]))
+summary(t(dist_carte_blanche))
+
+print("Itelis")
+print(paste("Avg no. of stores in each market:",rowMeans(n_itelis)))
+print("distance statistics")
+dist_itelis<-data.frame(dist_itelis)
+print(paste("distance n_obs:",dim(dist_itelis)[2]))
+summary(t(dist_itelis))
+
+print("Kalixia")
+print(paste("Avg no. of stores in each market:",rowMeans(n_kalixia)))
+print("distance statistics")
+dist_kalixia<-data.frame(dist_kalixia)
+print(paste("distance n_obs:",dim(dist_kalixia)[2]))
+summary(t(dist_kalixia))
+
+print("Santeclair")
+print(paste("Avg no. of stores in each market:",rowMeans(n_santeclair)))
+print("distance statistics")
+dist_santeclair<-data.frame(dist_santeclair)
+print(paste("distance n_obs:",dim(dist_santeclair)[2]))
+summary(t(dist_santeclair))
+
+print("Seveane")
+print(paste("Avg no. of stores in each market:",rowMeans(n_seveane)))
+print("distance statistics")
+dist_seveane<-data.frame(dist_seveane)
+print(paste("distance n_obs:",dim(dist_seveane)[2]))
+summary(t(dist_seveane))
+
+```
+
+
+```{r , echo=FALSE}
+# franchise vs non-francise
+x<-network %>%
+  rowwise() %>%
+  mutate(
+    total_networks = sum(c(carte_blanche,itelis,kalixia,sante_clair,seveane))
+  )
+
+x<-x%>%mutate(franchise_p=ifelse(is.na(franchise),0,1))
+x%>%ggplot( aes(x=franchise_p, y=total_networks,group=franchise_p)) +
+    geom_boxplot()+xlab("Franchise Indicator (=1 if part of franchise)")+ylab("Average no. of Network Affiliation by Stores")
+```
+
+```{r , echo=FALSE}
+# no of networks vs no. of shops
+y<-x%>%select(code_attraction_centre,total_networks)%>%filter(!is.na(total_networks))%>%group_by(code_attraction_centre)%>%summarise(`Average no. of networks`=mean(total_networks),`no. of shops`=n())
+ggplot(y,aes(`no. of shops`,`Average no. of networks`))+geom_point()+geom_smooth(method='lm',formula=y~x,se=FALSE)
+
+```
+
+Overview
+
+
+```{r , echo=FALSE}
+setwd('../')
+x=getwd()
+age <- read_excel("input/demographics/age.xlsx",skip = 3)
+car_ownership <- read_excel("input/demographics/car_ownership.xlsx", skip = 3)
+education <- read_excel("input/demographics/education.xlsx", skip = 3)
+
+family <- read_excel("input/demographics/family.xlsx", skip = 3)
+industry <- read_excel("input/demographics/industry.xlsx", skip = 3)
+job_type <- read_excel("input/demographics/job_type.xlsx", skip = 3)
+n_birth_death <- read_excel("input/demographics/n_birth_death.xlsx", skip = 3)
+residence <- read_excel("input/demographics/residence.xlsx", skip = 3)
+services <- read_excel("input/demographics/services.xlsx", skip = 3)
+
+income_market_level <- read_excel("input/demographics/income_market_level.xlsx", skip = 3)
+std_living_dep_level <- read_excel("input/demographics/std_living_dep_level.xlsx", skip = 3)
+unemployment_dep_level <- read_excel("input/demographics/unemployment_dep_level.xlsx", skip = 3)
+hotels <- read_excel("input/demographics/hotels.xlsx",skip = 3)
+
+# Filtering out overseas communes
+age<-age%>%filter(Code<97101)
+car_ownership<-car_ownership%>%filter(Code<97101)
+education<-education%>%filter(Code<97101)
+family<-family%>%filter(Code<97101)
+industry<-industry%>%filter(Code<97101)
+job_type<-job_type%>%filter(Code<97101)
+n_birth_death<-n_birth_death%>%filter(Code<97101)
+residence<-residence%>%filter(Code<97101)
+services<-services%>%filter(Code<97101)
+
+income_market_level<-income_market_level%>%filter(Code<97101)
+std_living_dep_level<-std_living_dep_level%>%filter(Code<97101)
+unemployment_dep_level<-unemployment_dep_level%>%filter(Code<97101)
+hotels<-hotels%>%filter(Code<97101)
+```
+
+
+```{r , echo=FALSE}
+
+age<-age %>% 
+  rename(
+    age_below_25=`Moins de 25 ans`,
+    age_25_64=`Entre 25 et 64 ans`,	
+    age_above_64=`65 ans ou plus`,
+    )
+
+age<-age %>%
+  rowwise() %>%
+  mutate(
+    n_ppl_source_age = sum(c(age_below_25,	age_25_64, age_above_64))
+  )
+
+
+car_ownership<-car_ownership %>% 
+  rename(
+    share_households_at_least_one_car_2018=`Part des ménages ayant au moins 1 voiture 2018`,
+    )
+
+education<-education %>%mutate(share_ppl_no_education_2018=
+                               `Part des non ou peu diplômés dans la pop. non scolarisée de 15 ans ou + 2018`,
+                               share_ppl_bepc_brevet_2018=
+                               `Part des pers., dont le diplôme le plus élevé est le bepc ou le brevet, dans la pop. non scolarisée de 15 ans ou + 2018`,
+                               share_ppl_cap_bep_2018=`Part des pers., dont le diplôme le plus élevé est un CAP ou un BEP, dans la pop. non scolarisée de 15 ans ou + 2018`,
+                               share_ppl_bac_2018=`Part des pers., dont le diplôme le plus élevé est le bac, dans la pop. non scolarisée de 15 ans ou + 2018`,
+                               share_ppl_bac_2_2018=`Part des diplômés d'un BAC+2 dans la pop. non scolarisée de 15 ans ou + 2018`,
+                               share_ppl_bac_3_4_2018=`Part des diplômés d'un BAC+3  ou BAC+4 dans la pop. non scolarisée de 15 ans ou + 2018`,
+                               share_ppl_bac_5_2018=`Part des diplômés d'un BAC+5 ou plus dans la pop. non scolarisée de 15 ans ou + 2018`)
+
+education<-education %>%
+  rowwise() %>%
+  mutate(
+    share_high_educ_aggregate = sum(c(share_ppl_bac_5_2018,	share_ppl_bac_3_4_2018, share_ppl_bac_2_2018)),
+    
+    share_medium_educ_aggregate = sum(c(share_ppl_bepc_brevet_2018, share_ppl_cap_bep_2018	,share_ppl_bac_2018))
+  )
+
+education<-education %>% 
+  mutate(
+    share_low_educ_aggregate=share_ppl_no_education_2018,
+    )
+
+education=subset(education,select=c(Code,share_ppl_no_education_2018,share_ppl_bepc_brevet_2018,share_ppl_cap_bep_2018,share_ppl_bac_2018,share_ppl_bac_2_2018,share_ppl_bac_3_4_2018,share_ppl_bac_5_2018,share_high_educ_aggregate,share_medium_educ_aggregate,share_low_educ_aggregate))
+
+family<-family %>% 
+  rename(
+    avg_hh_size=`Taille moyenne des ménages 2018`
+    )
+family=subset(family,select=c(Code,avg_hh_size))
+
+industry<-industry %>%
+  mutate(
+         share_industry_manufacturing_2020 = `Unités légales dans industrie manufacturière, industries extractives et autres (en nombre) 2020`/`Unités légales (en nombre) 2020`,
+         share_industry_construction_2020 = `Unités légales dans construction (en nombre) 2020`/`Unités légales (en nombre) 2020`,
+         share_industry_transport_catering_2020 = `Unités légales dans commerce de gros & détail, transports, hébergemnt & restauration (en nombre) 2020`/`Unités légales (en nombre) 2020`,
+         share_industry_communication_2020 = `Unités légales dans information et communication (en nombre) 2020`/`Unités légales (en nombre) 2020`,
+         share_industry_finance_2020 = `Unités légales dans activités financières et d'assurance (en nombre) 2020`/`Unités légales (en nombre) 2020`,
+         share_industry_real_estate_2020 = `Unités légales dans activités immobilières (en nombre) 2020`/`Unités légales (en nombre) 2020`,
+         share_industry_tech_2020 = `Unités légales dans act. spécial., scient. & techn. & act. de svices admin. & soutien (en nombre) 2020`/`Unités légales (en nombre) 2020`,
+         share_industry_public_admin_2020 = `Unités légales dans administration publ., enseignemnt, santé humaine & action sociale (en nombre) 2020`/`Unités légales (en nombre) 2020`,
+         share_industry_others_2020 = `Unités légales dans autres activités de services (en nombre) 2020`/`Unités légales (en nombre) 2020`)
+
+industry=subset(industry,select=c(Code,share_industry_manufacturing_2020,share_industry_construction_2020,share_industry_transport_catering_2020,share_industry_communication_2020,share_industry_finance_2020,share_industry_real_estate_2020,share_industry_tech_2020, share_industry_public_admin_2020,share_industry_others_2020))
+
+n_birth_death<-n_birth_death %>% 
+  rename(
+    n_births_2020=`Nombre de naissances domiciliées 2020`
+    )
+n_birth_death=subset(n_birth_death,select=c(Code,n_births_2020))
+
+services<-services %>%
+  rowwise() %>%
+  mutate(
+    n_educ_establisments_aggregate_2020 = sum(c(`Collège (en nombre) 2020`,	`Lycée (en nombre) 2020`)),
+    
+    n_medical_establisments_aggregate_2020 = sum(c(`Médecin généraliste (en nombre) 2020`,	`Chirurgien dentiste (en nombre) 2020`,	`Pharmacie (en nombre) 2020`))
+  )
+
+services<-services %>% 
+  rename(
+    n_banks_2020=`Banques (en nombre) 2020`,
+    n_grocery_stores_2020=`Supérette - Épicerie (en nombre) 2020`,
+    n_college_2020=`Collège (en nombre) 2020`,
+    n_lycee_2020=`Lycée (en nombre) 2020`,
+    n_gen_practioner_2020=`Médecin généraliste (en nombre) 2020`,
+    n_dentist_2020=`Chirurgien dentiste (en nombre) 2020`,
+    n_pharmacy_2020=`Pharmacie (en nombre) 2020`
+    )
+
+services=subset(services,select=c(Code,n_banks_2020,n_grocery_stores_2020,n_college_2020,n_lycee_2020,n_gen_practioner_2020,n_dentist_2020,n_pharmacy_2020,n_educ_establisments_aggregate_2020,n_medical_establisments_aggregate_2020))
+
+
+income_market_level<-income_market_level %>% 
+  rename(
+    avg_hourly_wage_2019=`Salaire net horaire moyen 2019`,
+    )
+income_market_level=subset(income_market_level,select=c(Code,avg_hourly_wage_2019))
+
+hotels<-hotels%>%rename(n_hotels=`Nb d'hôtels 2022`)
+hotels=subset(hotels,select=c(Code,n_hotels))
+
+job_type<-job_type%>%rename(employed_percent=`Taux d'activité par tranche d'âge 2018_x000d_
+Ensemble`)
+job_type=subset(job_type,select=c(Code,employed_percent))
+
+
+```
+
+
+```{r , echo=FALSE}
+# Demographic table created by merging individual tables at commune level 
+demographics<-merge(x = age, y = car_ownership, by=c("Code"), all.x = TRUE)
+demographics<-merge(x = demographics, y = education, by=c("Code"), all.x = TRUE)
+demographics<-merge(x = demographics, y = family, by=c("Code"), all.x = TRUE)
+demographics<-merge(x = demographics, y = industry, by=c("Code"), all.x = TRUE)
+demographics<-merge(x = demographics, y = n_birth_death, by=c("Code"), all.x = TRUE)
+demographics<-merge(x = demographics, y = services, by=c("Code"), all.x = TRUE)
+demographics<-merge(x = demographics, y = hotels, by=c("Code"), all.x = TRUE)
+demographics<-merge(x = demographics, y = job_type, by=c("Code"), all.x = TRUE)
+demographics=subset(demographics,select=-c(Libellé.x,Libellé.y))
+
+```
+
+```{r , echo=FALSE}
+# z<-unique(network$code_attraction_centre) # 148 markets
+# z<-unique(optique_networks_full$code_attraction_centre) # 178 markets
+
+z<-unique(optique_networks_full%>%select(code_commune_geo,code_attraction_centre))
+demographics_mkt<-merge(x = demographics, y = z, by.x ="Code" ,by.y = "code_commune_geo", all.x = TRUE)
+demographics_mkt<-demographics_mkt%>%filter(!is.na(code_attraction_centre))
+
+z1=subset(demographics_mkt,select=c(code_attraction_centre,age_below_25,age_25_64,age_above_64,n_ppl_source_age,n_births_2020,n_banks_2020,n_grocery_stores_2020,n_college_2020,n_lycee_2020,n_gen_practioner_2020,n_dentist_2020,n_pharmacy_2020,n_educ_establisments_aggregate_2020,n_medical_establisments_aggregate_2020,n_hotels))
+
+z2=subset(demographics_mkt,select=-c(Code,age_below_25,age_25_64,age_above_64,n_ppl_source_age,n_births_2020,n_banks_2020,n_grocery_stores_2020,n_college_2020,n_lycee_2020,n_gen_practioner_2020,n_dentist_2020,n_pharmacy_2020,n_educ_establisments_aggregate_2020,n_medical_establisments_aggregate_2020,n_hotels))
+
+z1<-z1 %>% group_by(code_attraction_centre) %>% summarise_each(list(sum))
+z2<-z2 %>% group_by(code_attraction_centre) %>% summarise_each(list(mean))
+
+demographics_mkt<-merge(x = z1, y = z2, by="code_attraction_centre", all.x = TRUE)
+
+
+x<-network %>%
+  rowwise() %>%
+  mutate(
+    total_networks = sum(c(carte_blanche,itelis,kalixia,sante_clair,seveane))
+  )
+x<-x%>%mutate(franchise_p=ifelse(is.na(franchise),0,1))
+sample_market_dem<-merge(x = x, y = demographics_mkt, by="code_attraction_centre", all.x = TRUE)
+
+sample_market_dem<-sample_market_dem%>%filter(!is.na(total_networks))
+
+# adding columns for no. of shops and avg. wage per market 
+
+z<-sample_market_dem%>%group_by(code_attraction_centre)%>%summarise(n=n(),n_franchise=sum(franchise_p))
+stores_market_reg<-merge(x = sample_market_dem, y = z, by="code_attraction_centre", all.x = TRUE)
+stores_market_reg$n[is.na(stores_market_reg$n)] <- 0
+
+stores_market_reg<-merge(x=stores_market_reg,y=income_market_level,by.x="code_attraction_centre",by.y="Code",all.x = TRUE) 
+stores_market_reg$avg_hourly_wage_2019<-as.numeric(stores_market_reg$avg_hourly_wage_2019)
+
+```
+
+
+```{r , echo=FALSE}
+# Regressions
+# no. of networks per shop
+
+network_demographics = glm.cluster(total_networks ~ log(age_below_25)+log(age_25_64)+log(age_above_64)+
+                             avg_hourly_wage_2019+
+                            avg_hh_size +share_high_educ_aggregate+
+                            share_medium_educ_aggregate 
+                            , data = stores_market_reg,family = "poisson",cluster="code_attraction_centre") 
+summary(network_demographics)
+
+```
+
+```{r , echo=FALSE}
+
+network_demographics = glm.cluster(total_networks ~ log(age_below_25)+log(age_25_64)+log(age_above_64)+
+                            avg_hourly_wage_2019 +
+                            avg_hh_size+ share_ppl_no_education_2018+share_ppl_bepc_brevet_2018+share_ppl_cap_bep_2018
+                            +share_ppl_bac_2018+share_ppl_bac_2_2018+share_ppl_bac_3_4_2018+share_ppl_bac_5_2018
+                            +share_industry_transport_catering_2020
+                            +share_industry_communication_2020+share_industry_finance_2020
+                            +share_industry_real_estate_2020+share_industry_tech_2020
+                            +share_industry_public_admin_2020, data = stores_market_reg,family = "poisson",cluster="code_attraction_centre") 
+summary(network_demographics)
+```
+
+
+```{r , echo=FALSE}
+# no. of franchises in a market
+
+# adding zero store communes for regression
+z<-zero_optique_communes %>%
+  mutate(
+    n = 0,
+    n_franchise=0
+  )
+z<-z%>%select(code_attraction_centre,n,n_franchise)
+stores_market_reg2<-merge(x = z, y = demographics_mkt, by="code_attraction_centre", all.x = TRUE)
+
+
+stores_market_reg2<-merge(x=stores_market_reg2,y=income_market_level,by.x="code_attraction_centre",by.y="Code",all.x = TRUE) 
+stores_market_reg2$avg_hourly_wage_2019<-as.numeric(stores_market_reg2$avg_hourly_wage_2019)
+
+#
+# control variables for communes with atleast one shop 
+stores_market_reg3<-unique(stores_market_reg%>%select(code_attraction_centre,n_franchise,n,age_below_25,age_25_64,age_above_64,avg_hourly_wage_2019,avg_hh_size,share_high_educ_aggregate,share_medium_educ_aggregate,share_low_educ_aggregate, share_ppl_no_education_2018,share_ppl_bepc_brevet_2018,share_ppl_cap_bep_2018
+                            ,share_ppl_bac_2018,share_ppl_bac_2_2018,share_ppl_bac_3_4_2018,share_ppl_bac_5_2018,
+                            share_industry_transport_catering_2020
+                            ,share_industry_communication_2020,share_industry_finance_2020
+                            ,share_industry_real_estate_2020,share_industry_tech_2020
+                            ,share_industry_public_admin_2020))
+
+# control variables for communes with zero shops 
+stores_market_reg4<-unique(stores_market_reg2%>%select(code_attraction_centre,n_franchise,n,age_below_25,age_25_64,age_above_64,avg_hourly_wage_2019,avg_hh_size,share_high_educ_aggregate,share_medium_educ_aggregate,share_low_educ_aggregate, share_ppl_no_education_2018,share_ppl_bepc_brevet_2018,share_ppl_cap_bep_2018
+                            ,share_ppl_bac_2018,share_ppl_bac_2_2018,share_ppl_bac_3_4_2018,share_ppl_bac_5_2018,
+                            share_industry_transport_catering_2020
+                            ,share_industry_communication_2020,share_industry_finance_2020
+                            ,share_industry_real_estate_2020,share_industry_tech_2020
+                            ,share_industry_public_admin_2020))
+
+# append and groupby
+stores_market_reg4<-rbind(stores_market_reg3,stores_market_reg4)
+
+z1<-stores_market_reg4%>%group_by(code_attraction_centre)%>%summarise(n_franchise=sum(n_franchise),n=sum(n))
+z2=unique(subset(stores_market_reg4,select=-c(n_franchise,n)))
+stores_market_reg4<-merge(x=z1,y=z2,by="code_attraction_centre", all.x = TRUE)
+
+# Regression
+network_demographics = glm.cluster(n_franchise ~ log(age_below_25)+log(age_25_64)+log(age_above_64)+
+                            avg_hourly_wage_2019 +
+                            avg_hh_size +share_high_educ_aggregate
+                            +share_medium_educ_aggregate
+                            , data = stores_market_reg4,family = "poisson",cluster="code_attraction_centre") 
+summary(network_demographics)
+
+```
+
+```{r , echo=FALSE}
+
+
+network_demographics = glm.cluster(n_franchise ~ log(age_below_25)+log(age_25_64)+log(age_above_64)+
+                            avg_hourly_wage_2019 +
+                            avg_hh_size +share_ppl_no_education_2018+share_ppl_bepc_brevet_2018+share_ppl_cap_bep_2018
+                            +share_ppl_bac_2018+share_ppl_bac_2_2018+share_ppl_bac_3_4_2018+share_ppl_bac_5_2018+
+                            share_industry_transport_catering_2020
+                            +share_industry_communication_2020+share_industry_finance_2020
+                            +share_industry_real_estate_2020+share_industry_tech_2020
+                            +share_industry_public_admin_2020
+                            , data = stores_market_reg4,family = "poisson",cluster="code_attraction_centre") 
+summary(network_demographics)
+
+```
+
+```{r , echo=FALSE}
+
+
+network_demographics = glm.cluster(n ~ log(age_below_25)+log(age_25_64)+log(age_above_64)+
+                            avg_hourly_wage_2019 +
+                            avg_hh_size +share_high_educ_aggregate
+                            +share_medium_educ_aggregate
+                            , data = stores_market_reg4,family = "poisson",cluster="code_attraction_centre") 
+summary(network_demographics)
+
+```
+
+```{r , echo=FALSE}
+network_demographics = glm.cluster(n ~ log(age_below_25)+log(age_25_64)+log(age_above_64)+
+                            avg_hourly_wage_2019 +
+                            avg_hh_size +share_ppl_no_education_2018+share_ppl_bepc_brevet_2018+share_ppl_cap_bep_2018
+                            +share_ppl_bac_2018+share_ppl_bac_2_2018+share_ppl_bac_3_4_2018+share_ppl_bac_5_2018+
+                            share_industry_transport_catering_2020
+                            +share_industry_communication_2020+share_industry_finance_2020
+                            +share_industry_real_estate_2020+share_industry_tech_2020
+                            +share_industry_public_admin_2020
+                            , data = stores_market_reg4,family = "poisson",cluster="code_attraction_centre") 
+summary(network_demographics)
+
+```
+
+
+```{r , echo=FALSE}
+# Miscellaneous codes below
+```
+
+```{r , echo=FALSE}
+#commune geometric centroid
+setwd('../')
+x=getwd()
+commune_centroid_df <- read_csv("code/commune_centroid_geometric.csv")
+```
+
+```{r , echo=FALSE}
+z<-optique_networks_full%>%select(code_commune_geo)%>%group_by(code_commune_geo)%>%summarise(n_shops_in_commune=n())# 1337 rows matching with centroid data 
+commune_centroid_df<-merge(x=commune_centroid_df,y=z,by.x="commune_code",by.y="code_commune_geo",all.x = TRUE) # NA values in merge. Check !!
+z1<-unique(optique_networks_full%>%select(code_attraction_centre,code_commune_geo))
+commune_centroid_df<-merge(x=commune_centroid_df,y=z1,by.x="commune_code",by.y="code_commune_geo",all.x = TRUE)
+```
+
+```{r , echo=FALSE}
+# Distance bands of 0.5 km and 3 km
+market_list=commune_centroid_df$code_attraction_centre
+for (market_code in market_list){
+  df1<-commune_centroid_df%>%filter(code_attraction_centre==market_code)
+  test1<-distm(data.matrix(select(df1, shop_long, shop_lat)), fun = distHaversine)/1000
+}
+```
+
+```{r , echo=FALSE}
+# test
+market_code=480
+df1<-commune_centroid_df%>%filter(code_attraction_centre==market_code)
+test1<-distm(data.matrix(select(df1, long_centroid, lat_centroid)), fun = distHaversine)/1000
+```

@@ -1,0 +1,145 @@
+---
+title: "test"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r}
+library(ggplot2)
+library(tidyverse)
+library(readxl)
+library(readr)
+
+
+```
+
+
+Importing datasets
+
+Sources:-
+
+1. UU2010_au_01-01-2020.xlsx: Communes belonging to urban units (2010 definition)
+                              (https://www.insee.fr/fr/information/2115018)
+                              New 2020 definition (not yet used): https://www.insee.fr/fr/information/4802589
+                              
+2. ensemble.xls: Population at commune level
+                 (https://www.insee.fr/fr/statistiques/4265429?sommaire=4265511)
+                 
+3. communes-departement-region.csv: Geographical location of each commune                                                                       (https://www.data.gouv.fr/en/datasets/communes-de-france-base-des-codes-postaux/)
+
+4. attraction_city.xlsx: 2020 city attraction zoning areas. Consists of Pole (highly dense population) and                                Suburbs (https://www.insee.fr/fr/statistiques/5039879?sommaire=5040030)
+
+5. etablissements.csv: Optique shop level data. Go to wesite-> build a list-> Check Active establishment box->                          Activity-> 47.78A from Dropdown (https://sirene.fr/sirene/public/accueil)
+
+```{r pressure, echo=FALSE}
+
+commune <- read_excel("UU2010_au_01-01-2020.xlsx",sheet = "Composition_communale", skip = 5)
+commune_pop <- read_excel("ensemble.xls", sheet = "Communes", skip = 7)
+commune_location <- read_csv("communes-departement-region.csv", 
+col_types = cols(code_commune_INSEE = col_character(), code_departement = col_character()))
+attraction_city <- read_excel("attraction_city.xlsx", skip = 2)
+etablissements <- read_csv("etablissements.csv")
+
+```
+
+Filtering out urban units and cleaning the keys column in different tables to make them merge compatible
+```{r , echo=FALSE}
+
+commune_urban<-commune%>%filter(TYPE_COM=='URBAIN')
+
+commune_location$Name_length = str_length(commune_location$code_commune_INSEE) 
+commune_location<-commune_location%>%mutate(code_commune_INSEE=ifelse(Name_length == 4, paste0("0",commune_location$code_commune_INSEE),commune_location$code_commune_INSEE)) 
+
+commune_location=subset(commune_location,select=-c(ligne_5,code_postal))
+commune_location <- unique( commune_location )
+
+commune_pop$code_new = paste0(commune_pop$"Code département",commune_pop$"Code commune")
+
+```
+
+Merging commune urban units table with population and location table (code commune is the key)
+
+```{r , echo=FALSE}
+
+commune_urban_loc<-merge(x = commune_urban, y = commune_location, by.x = "CODGEO",by.y="code_commune_INSEE", all.x = TRUE)
+
+#data.frame(sapply(commune_urban_loc, function(y) sum(length(which(is.na(y))))) )
+#x<-commune_urban_loc %>% filter(is.na(code_commune))
+commune_urban_loc<-commune_urban_loc %>% filter(!is.na(code_commune))
+
+commune_urban_final<-merge(x = commune_urban_loc, y = commune_pop, by.x = "CODGEO",by.y="code_new", all.x = TRUE)
+
+commune_urban_final<-commune_urban_final%>%select("CODGEO","LIBGEO","LIBUU2010","DEP","latitude","longitude","Population totale")
+
+```
+
+
+```{r , echo=FALSE}
+commune_urban_final<-commune_urban_final%>%filter(latitude>=40)
+commune_urban_final<-commune_urban_final%>% rename(
+    population = `Population totale`
+    )
+```
+
+Preliminary geographical plots
+```{r , echo=FALSE}
+
+ggplot(commune_urban_final,aes(x=longitude,y=latitude,group=LIBUU2010))+geom_polygon(aes(fill=population))
+ggplot(commune_urban_final,aes(x=longitude,y=latitude,group=LIBUU2010))+geom_polygon(aes(colour=population))
+ggplot(commune_urban_final,aes(x=longitude,y=latitude,group=LIBUU2010))+geom_point(aes(shape=".",colour=population))
+
+#x=arrange(commune_urban_final,latitude,longitude)
+```
+
+New aires d'attractions:
+```{r , echo=FALSE}
+
+attraction_city$Name_length = str_length(attraction_city$"Code géographique de la commune") 
+attraction_city<-attraction_city%>%mutate("Code géographique de la commune"=ifelse(Name_length == 4, paste0("0",attraction_city$"Code géographique de la commune"),attraction_city$"Code géographique de la commune")) 
+attraction_city=subset(attraction_city,select=-c(`Code département`,`Code région`,Name_length))
+
+```
+
+```{r , echo=FALSE}
+commune_merge<-merge(x = commune_urban_final, y = attraction_city, by.x = "CODGEO",by.y="Code géographique de la commune", all.x = TRUE)
+
+commune_merge_shop<-merge(x = commune_merge, y = etablissements, by.x = "CODGEO",by.y="codeCommuneEtablissement", all.x = TRUE)
+```
+
+
+```{r , echo=FALSE}
+
+commune_merge2<-commune_merge%>%select("Code géographique de l'aire d'attraction des villes 2020",population)
+
+commune_merge3<-aggregate(commune_merge2$population,by=list(attraction_code=commune_merge2$`Code géographique de l'aire d'attraction des villes 2020`),FUN=sum)
+commune_merge3=arrange(commune_merge3,x)
+```
+
+Merge to get top 100 least populated attraction units
+```{r , echo=FALSE}
+
+commune_top_100<-head(commune_merge3,100)
+x=commune_top_100$attraction_code
+shop_top_communes<-subset(commune_merge_shop, `Code géographique de l'aire d'attraction des villes 2020` %in% x)
+
+```
+
+test
+```{r , echo=FALSE}
+shop_top_commune<-subset(commune_merge_shop, `Code géographique de l'aire d'attraction des villes 2020` %in% x[1])
+shop_top_commune2<-subset(commune_merge_shop, `Code géographique de l'aire d'attraction des villes 2020` %in% x[2])
+shop_top_commune3<-subset(commune_merge_shop, `Code géographique de l'aire d'attraction des villes 2020` %in% x[3])
+shop_top_commune4<-subset(commune_merge_shop, `Code géographique de l'aire d'attraction des villes 2020` %in% x[4])
+shop_top_commune5<-subset(commune_merge_shop, `Code géographique de l'aire d'attraction des villes 2020` %in% x[5])
+```
+
+```{r , echo=FALSE}
+commune_merge4<-merge(x = shop_top_communes, y = commune_merge3, by.x = "Code géographique de l'aire d'attraction des villes 2020",by.y="attraction_code", all.x = TRUE)
+y<-arrange(commune_merge4,x)
+write.csv(y,"optiques_100_centres.csv", row.names = TRUE)
+```
